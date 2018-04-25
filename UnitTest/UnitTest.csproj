@@ -16,7 +16,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="EntityFramework" Version="6.2.0" />
     <PackageReference Include="EWill.Core" Version="1.0.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="15.5.0" />
     <PackageReference Include="System.Data.SqlClient" Version="4.5.0-preview2-26406-04" />

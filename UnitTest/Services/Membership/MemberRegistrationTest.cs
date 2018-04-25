@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using Xunit;
 using System.Data.SqlClient;
 using Newtonsoft.Json.Linq;
+using System.Collections.Generic;
 
 namespace UnitTest.Services.Membership
 {
@@ -16,12 +17,23 @@ namespace UnitTest.Services.Membership
     {
         const string DEV_MODE = "DEVTEST";
 
-        public string IdentityApiUrl => DEV_MODE == "DEVTEST" ? "http://11.11.5.146:5540/api" : "";
+        public string IdentityApiUrl => DEV_MODE == "DEVTEST" ? "http://11.11.5.146:5550/api" : "";
+        public string IdentityUrl => DEV_MODE == "DEVTEST" ? "http://11.11.5.146:5540" : "";
+
         public object EWillClientId => "mobile.ios";
         public object EWillClientKey => "Xv5LpK8K15";
 
         public string StdPassword => "Standar123.";
-        const string UserIdGlobal = "UnitTest2";
+
+        public string AccessToken { get; private set; }
+        public DateTime ExpireAccessToken { get; private set; }
+
+        static string UserIdGlobal = "";
+
+        public MemberRegistrationTest()
+        {
+            UserIdGlobal = "UnitTest" + GetUniqueKey(3);
+        }
 
         static string getTokenValidation(string userID) {
 
@@ -135,6 +147,38 @@ namespace UnitTest.Services.Membership
             client.DefaultRequestHeaders.Add("x-version", "1.0");
         }
 
+        private async Task GenHeandersWithBearerToken(HttpClient client, Guid requestId, string username = null, string password = null)
+        {
+            if (ExpireAccessToken <= DateTime.Now)
+            {
+                HttpResponseMessage response = null;
+                if (!(string.IsNullOrEmpty(username) && string.IsNullOrEmpty(password)))
+                    response = await client.PostAsync(IdentityUrl + "/connect/token", new StringContent($"client_id={EWillClientId}&client_secret={EWillClientKey}&scope=ewill&grant_type=password&username={username}&password={password}", Encoding.UTF8, "application/x-www-form-urlencoded"));
+                else
+                    response = await client.PostAsync(IdentityUrl + "/connect/token", new StringContent($"client_id={EWillClientId}&client_secret={EWillClientKey}&scope=ewill&grant_type=client_credentials", Encoding.UTF8, "application/x-www-form-urlencoded"));
+
+                IDictionary<string, string> result = JsonConvert.DeserializeObject<IDictionary<string, string>>(await response.Content.ReadAsStringAsync());
+                if (result.ContainsKey("error"))
+                    Assert.False(true, result["error"]);
+
+                AccessToken = result["access_token"];
+                ExpireAccessToken = DateTime.Now.AddSeconds(int.Parse(result["expires_in"]));
+            }
+
+            var headers = client.DefaultRequestHeaders;
+
+            headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", AccessToken);
+            if (!headers.Any(o => o.Key == "x-agent"))
+                headers.Add("x-agent", "mobile");
+
+            if (!headers.Any(o => o.Key == "x-version"))
+                headers.Add("x-version", "1.0");
+
+            if (headers.Any(x => x.Key == "x-requestid"))
+                headers.Remove("x-requestid");
+            headers.Add("x-requestid", requestId.ToString());
+        }
+
         public static string GetUniqueKey(int maxSize)
         {
             char[] chars = new char[62];
@@ -156,11 +200,165 @@ namespace UnitTest.Services.Membership
             return result.ToString();
         }
 
+        private async Task RegistrationSuccessfull(dynamic data)
+        {
+            StandardApiResponse<bool> result = null;
+            StandardApiResponse<bool> expectedResult = new StandardApiResponse<bool>(true, "1.0", true);
+
+
+            using (var client = new HttpClient())
+            {
+                Guid requestId = Guid.NewGuid();
+
+                await GenHeandersWithBearerToken(client, requestId);
+
+                var response = await client.PostAsync($"{IdentityApiUrl}/account/register", new StringContent(JsonConvert.SerializeObject(data), Encoding.UTF8, "application/json"));
+                if (response.IsSuccessStatusCode)
+                {
+                    var content = await response.Content.ReadAsStringAsync();
+                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(content);
+                    if (!result.Success)
+                    {
+                        Assert.False(true, await response.Content.ReadAsStringAsync());
+                    }
+                }
+                else
+                {
+                    Assert.False(true, await response.Content.ReadAsStringAsync());
+                }
+
+            }
+
+            Assert.Equal(expectedResult.Success, result.Success);
+            Assert.Equal(expectedResult.Result, result.Result);
+        }
+
         [Fact(DisplayName = "Registration-001 : Sign up successfull")]
         public async Task Registration001()
         {
 
-            var data = new RegistrationForm {
+            var data = new RegistrationForm
+            {
+                Username = UserIdGlobal,
+                Email = "leonardi.jordan@gmail.com",
+                Password = StdPassword,
+                Pin = 132456,
+                Country = "Indonesia",
+                CountryCode = "IDN",
+                MobileNumber = "+6289613773993",
+                SecurityQuestion = "Who is your President?",
+                SecurityAnswer = "Jokowi"
+            };
+
+
+            await RegistrationSuccessfull(data);
+        }
+
+        [Fact(DisplayName = "Registration-002 : Failed to sign up because username already used")]
+        public async Task Registration002()
+        {
+            var data = new RegistrationForm
+            {
+                Username = UserIdGlobal,
+                Email = "leonardi.jordan@gmail.com",
+                Password = StdPassword,
+                Pin = 132456,
+                Country = "Indonesia",
+                CountryCode = "IDN",
+                MobileNumber = "+6289613773993",
+                SecurityQuestion = "Who is your President?",
+                SecurityAnswer = "Jokowi"
+            };
+
+
+            await RegistrationSuccessfull(data);
+
+            StandardApiResponse<bool> checkExistsresult = null;
+            StandardApiResponse<bool> checkExistsExpectedesult = new StandardApiResponse<bool>(false, "1.0", false);
+
+
+            using (var client = new HttpClient())
+            {
+                Guid requestId = Guid.NewGuid();
+                await GenHeandersWithBearerToken(client, requestId);
+
+
+                var response = await client.PostAsync($"{IdentityApiUrl}/account/register", new StringContent(JsonConvert.SerializeObject(data), Encoding.UTF8, "application/json"));
+                if (response.IsSuccessStatusCode)
+                {
+                    var content = await response.Content.ReadAsStringAsync();
+                    checkExistsresult = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(content);
+                    Assert.Equal(checkExistsExpectedesult.Success, checkExistsresult.Success);
+                    Assert.Equal(checkExistsExpectedesult.Result, checkExistsresult.Result);
+                }
+                else
+                {
+                    Assert.False(true, await response.Content.ReadAsStringAsync());
+                }
+            }
+        }
+
+        [Fact(DisplayName = "Registration-003 : Validation Email successfull ")]
+        public async Task Registration003() {
+
+            var data = new RegistrationForm
+            {
+                Username = UserIdGlobal,
+                Email = "leonardi.jordan@gmail.com",
+                Password = StdPassword,
+                Pin = 132456,
+                Country = "Indonesia",
+                CountryCode = "IDN",
+                MobileNumber = "+6289613773993",
+                SecurityQuestion = "Who is your President?",
+                SecurityAnswer = "Jokowi"
+            };
+
+
+            await RegistrationSuccessfull(data);
+
+
+            var requestConfirmEmail = new ValidationEmailForm
+            {
+                userName = UserIdGlobal,
+                token = getTokenValidation(UserIdGlobal)
+            };
+
+            StandardApiResponse<bool> confirmEmailResult = null;
+            StandardApiResponse<bool> confirmEmailExpectedResult = new StandardApiResponse<bool>(true, "1.0", true);
+
+            using (var client = new HttpClient())
+            {
+                Guid requestId = Guid.NewGuid();
+                await GenHeandersWithBearerToken(client, requestId);
+
+                var response = await client.PostAsync($"{IdentityApiUrl}/account/confirm-email", new StringContent(JsonConvert.SerializeObject(data), Encoding.UTF8, "application/json"));
+                if (response.IsSuccessStatusCode)
+                {
+                    var content = await response.Content.ReadAsStringAsync();
+                    confirmEmailResult = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(content);
+                    if (!confirmEmailResult.Success)
+                    {
+                        Assert.False(true, await response.Content.ReadAsStringAsync());
+                    }
+                }
+                else
+                {
+                    Assert.False(true, await response.Content.ReadAsStringAsync());
+                }
+
+            }
+
+            Assert.Equal(confirmEmailExpectedResult.Success, confirmEmailResult.Success);
+            Assert.Equal(confirmEmailExpectedResult.Result, confirmEmailResult.Result);
+        }
+
+
+       [Fact(DisplayName = "Registration-004 : Validation email username falied")]
+        public async Task Registration004() {
+
+            var data = new RegistrationForm
+            {
                 Username = UserIdGlobal,
                 Email = "leonardi.jordan@gmail.com",
                 Password = StdPassword,
@@ -179,162 +377,61 @@ namespace UnitTest.Services.Membership
 
             using (var client = new HttpClient())
             {
-                GenHeadersWithBasicAuth(client);
+                Guid requestId = Guid.NewGuid();
+
+                await GenHeandersWithBearerToken(client, requestId);
 
                 var response = await client.PostAsync($"{IdentityApiUrl}/account/register", new StringContent(JsonConvert.SerializeObject(data), Encoding.UTF8, "application/json"));
                 if (response.IsSuccessStatusCode)
                 {
-                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(await response.Content.ReadAsStringAsync());
+                    var content = await response.Content.ReadAsStringAsync();
+                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(content);
+                    if (!result.Success)
+                    {
+                        Assert.False(true, await response.Content.ReadAsStringAsync());
+                    }
                 }
                 else
                 {
-                    switch (response.StatusCode)
-                    {
-                        case System.Net.HttpStatusCode.BadRequest:
-                            Assert.False(true, response.ReasonPhrase + await response.Content.ReadAsStringAsync());
-                            break;
-
-                        case System.Net.HttpStatusCode.InternalServerError:
-                            Assert.False(true, "Internal code error - please check the source code" + await response.Content.ReadAsStringAsync());
-                            break;
-                    }
-                }
-                    
-            }
-
-            Assert.Equal(expectedResult.Success, result.Success);
-            Assert.Equal(expectedResult.Result, result.Result);
-        }
-
-        [Fact(DisplayName = "Registration-002 : Failed to sign up because username already used")]
-        public async Task Registration002()
-        {
-            var data = new RegistrationForm
-            {
-                Username = "jordan",
-                Email = "leonardi.jordan@gmail.com",
-                Password = StdPassword,
-                Pin = 132456,
-                Country = "Indonesia",
-                CountryCode = "IDN",
-                MobileNumber = "+6289613773993",
-                SecurityQuestion = "Who is your President?",
-                SecurityAnswer = "Jokowi"
-            };
-
-
-            StandardApiResponse<bool> result = null;
-            StandardApiResponse<bool> expectedResult = new StandardApiResponse<bool>(false, "1.0", false);
-
-
-            using (var client = new HttpClient())
-            {
-                GenHeadersWithBasicAuth(client);
-
-                var response = await client.PostAsync($"{IdentityApiUrl}/account/register", new StringContent(JsonConvert.SerializeObject(data), Encoding.UTF8, "application/json"));
-                if (response.IsSuccessStatusCode)
-                {
-                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(await response.Content.ReadAsStringAsync());
-                }
-                else
-                {
-                    switch (response.StatusCode)
-                    {
-                        case System.Net.HttpStatusCode.BadRequest:
-                            Assert.False(true, response.ReasonPhrase + await response.Content.ReadAsStringAsync());
-                            break;
-
-                        case System.Net.HttpStatusCode.InternalServerError:
-                            Assert.False(true, "Internal code error - please check the source code" + await response.Content.ReadAsStringAsync());
-                            break;
-                    }
+                    Assert.False(true, await response.Content.ReadAsStringAsync());
                 }
 
             }
 
             Assert.Equal(expectedResult.Success, result.Success);
             Assert.Equal(expectedResult.Result, result.Result);
-        }
 
-        [Fact(DisplayName = "Registration-003 : Validation Email successfull ")]
-        public async Task Registration003() {
 
-            var data = new ValidationEmailForm
-            {
-                userName = UserIdGlobal,
-                token = getTokenValidation(UserIdGlobal)
-            };
-
-            StandardApiResponse<bool> result = null;
-            StandardApiResponse<bool> expectedResult = new StandardApiResponse<bool>(true, "1.0", true);
-
-            using (var client = new HttpClient())
-            {
-                GenHeadersWithBasicAuth(client);
-
-                var response = await client.PostAsync($"{IdentityApiUrl}/account/confirm-email", new StringContent(JsonConvert.SerializeObject(data), Encoding.UTF8, "application/json"));
-                if (response.IsSuccessStatusCode)
-                {
-                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(await response.Content.ReadAsStringAsync());
-                }
-                else
-                {
-                    switch (response.StatusCode)
-                    {
-                        case System.Net.HttpStatusCode.BadRequest:
-                            Assert.False(true, response.ReasonPhrase + await response.Content.ReadAsStringAsync());
-                            break;
-
-                        case System.Net.HttpStatusCode.InternalServerError:
-                            Assert.False(true, "Internal code error - please check the source code" + await response.Content.ReadAsStringAsync());
-                            break;
-                    }
-                }
-
-            }
-
-            Assert.Equal(expectedResult.Success, result.Success);
-            Assert.Equal(expectedResult.Result, result.Result);
-        }
-
-       [Fact(DisplayName = "Registration-004 : Validation email username falied")]
-        public async Task Registration004() {
-            var data = new ValidationEmailForm
+            var confirmEmailRequest = new ValidationEmailForm
             {
                 userName = "UnitTest1234",
                 token = getTokenValidation(UserIdGlobal)
             };
 
-            StandardApiResponse<bool> result = null;
-            StandardApiResponse<bool> expectedResult = new StandardApiResponse<bool>(false, "1.0", false);
+            StandardApiResponse<bool> confirmEmailResult = null;
+            StandardApiResponse<bool> confirmEmailExpectedResult = new StandardApiResponse<bool>(false, "1.0", false);
 
             using (var client = new HttpClient())
             {
-                GenHeadersWithBasicAuth(client);
+                Guid requestId = Guid.NewGuid();
+                await GenHeandersWithBearerToken(client, requestId);
 
                 var response = await client.PostAsync($"{IdentityApiUrl}/account/confirm-email", new StringContent(JsonConvert.SerializeObject(data), Encoding.UTF8, "application/json"));
                 if (response.IsSuccessStatusCode)
                 {
-                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(await response.Content.ReadAsStringAsync());
+                    var content = await response.Content.ReadAsStringAsync();
+                    confirmEmailResult = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(content);
+                    Assert.Equal(confirmEmailExpectedResult.Success, confirmEmailResult.Success);
+                    Assert.Equal(confirmEmailExpectedResult.Result, confirmEmailResult.Result);
                 }
                 else
                 {
-                    switch (response.StatusCode)
-                    {
-                        case System.Net.HttpStatusCode.BadRequest:
-                            Assert.False(true, response.ReasonPhrase + await response.Content.ReadAsStringAsync());
-                            break;
-
-                        case System.Net.HttpStatusCode.InternalServerError:
-                            Assert.False(true, "Internal code error - please check the source code" + await response.Content.ReadAsStringAsync());
-                            break;
-                    }
+                    Assert.False(true, await response.Content.ReadAsStringAsync());
                 }
 
             }
 
-            Assert.Equal(expectedResult.Success, result.Success);
-            Assert.Equal(expectedResult.Result, result.Result);
+            
         }
 
         [Fact(DisplayName = "Registration-005 : Validation email token falied")]
@@ -351,25 +448,22 @@ namespace UnitTest.Services.Membership
 
             using (var client = new HttpClient())
             {
-                GenHeadersWithBasicAuth(client);
+                Guid requestId = Guid.NewGuid();
+                await GenHeandersWithBearerToken(client, requestId);
 
                 var response = await client.PostAsync($"{IdentityApiUrl}/account/confirm-email", new StringContent(JsonConvert.SerializeObject(data), Encoding.UTF8, "application/json"));
                 if (response.IsSuccessStatusCode)
                 {
-                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(await response.Content.ReadAsStringAsync());
+                    var content = await response.Content.ReadAsStringAsync();
+                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(content);
+                    if (!result.Success)
+                    {
+                        Assert.False(true, await response.Content.ReadAsStringAsync());
+                    }
                 }
                 else
                 {
-                    switch (response.StatusCode)
-                    {
-                        case System.Net.HttpStatusCode.BadRequest:
-                            Assert.False(true, response.ReasonPhrase + await response.Content.ReadAsStringAsync());
-                            break;
-
-                        case System.Net.HttpStatusCode.InternalServerError:
-                            Assert.False(true, "Internal code error - please check the source code" + await response.Content.ReadAsStringAsync());
-                            break;
-                    }
+                    Assert.False(true, await response.Content.ReadAsStringAsync());
                 }
 
             }
@@ -392,25 +486,23 @@ namespace UnitTest.Services.Membership
 
             using (var client = new HttpClient())
             {
-                GenHeadersWithBasicAuth(client);
+                Guid requestId = Guid.NewGuid();
+                await GenHeandersWithBearerToken(client, requestId);
+
 
                 var response = await client.PostAsync($"{IdentityApiUrl}/account/confirm-phone-number", new StringContent(JsonConvert.SerializeObject(data), Encoding.UTF8, "application/json"));
                 if (response.IsSuccessStatusCode)
                 {
-                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(await response.Content.ReadAsStringAsync());
+                    var content = await response.Content.ReadAsStringAsync();
+                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(content);
+                    if (!result.Success)
+                    {
+                        Assert.False(true, await response.Content.ReadAsStringAsync());
+                    }
                 }
                 else
                 {
-                    switch (response.StatusCode)
-                    {
-                        case System.Net.HttpStatusCode.BadRequest:
-                            Assert.False(true, response.ReasonPhrase + await response.Content.ReadAsStringAsync());
-                            break;
-
-                        case System.Net.HttpStatusCode.InternalServerError:
-                            Assert.False(true, "Internal code error - please check the source code" + await response.Content.ReadAsStringAsync());
-                            break;
-                    }
+                    Assert.False(true, await response.Content.ReadAsStringAsync());
                 }
 
             }
@@ -432,25 +524,22 @@ namespace UnitTest.Services.Membership
 
             using (var client = new HttpClient())
             {
-                GenHeadersWithBasicAuth(client);
+                Guid requestId = Guid.NewGuid();
+                await GenHeandersWithBearerToken(client, requestId);
 
                 var response = await client.PostAsync($"{IdentityApiUrl}/account/confirm-phone-number", new StringContent(JsonConvert.SerializeObject(data), Encoding.UTF8, "application/json"));
                 if (response.IsSuccessStatusCode)
                 {
-                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(await response.Content.ReadAsStringAsync());
+                    var content = await response.Content.ReadAsStringAsync();
+                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(content);
+                    if (!result.Success)
+                    {
+                        Assert.False(true, await response.Content.ReadAsStringAsync());
+                    }
                 }
                 else
                 {
-                    switch (response.StatusCode)
-                    {
-                        case System.Net.HttpStatusCode.BadRequest:
-                            Assert.False(true, response.ReasonPhrase + await response.Content.ReadAsStringAsync());
-                            break;
-
-                        case System.Net.HttpStatusCode.InternalServerError:
-                            Assert.False(true, "Internal code error - please check the source code" + await response.Content.ReadAsStringAsync());
-                            break;
-                    }
+                    Assert.False(true, await response.Content.ReadAsStringAsync());
                 }
 
             }
@@ -473,25 +562,22 @@ namespace UnitTest.Services.Membership
 
             using (var client = new HttpClient())
             {
-                GenHeadersWithBasicAuth(client);
+                Guid requestId = Guid.NewGuid();
+                await GenHeandersWithBearerToken(client, requestId);
 
                 var response = await client.PostAsync($"{IdentityApiUrl}/account/confirm-phone-number", new StringContent(JsonConvert.SerializeObject(data), Encoding.UTF8, "application/json"));
                 if (response.IsSuccessStatusCode)
                 {
-                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(await response.Content.ReadAsStringAsync());
+                    var content = await response.Content.ReadAsStringAsync();
+                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(content);
+                    if (!result.Success)
+                    {
+                        Assert.False(true, await response.Content.ReadAsStringAsync());
+                    }
                 }
                 else
                 {
-                    switch (response.StatusCode)
-                    {
-                        case System.Net.HttpStatusCode.BadRequest:
-                            Assert.False(true, response.ReasonPhrase + await response.Content.ReadAsStringAsync());
-                            break;
-
-                        case System.Net.HttpStatusCode.InternalServerError:
-                            Assert.False(true, "Internal code error - please check the source code" + await response.Content.ReadAsStringAsync());
-                            break;
-                    }
+                    Assert.False(true, await response.Content.ReadAsStringAsync());
                 }
 
             }
@@ -514,25 +600,22 @@ namespace UnitTest.Services.Membership
 
             using (var client = new HttpClient())
             {
-                GenHeadersWithBasicAuth(client);
+                Guid requestId = Guid.NewGuid();
+                await GenHeandersWithBearerToken(client, requestId);
 
                 var response = await client.PostAsync($"{IdentityApiUrl}/account/login", new StringContent(JsonConvert.SerializeObject(data), Encoding.UTF8, "application/json"));
                 if (response.IsSuccessStatusCode)
                 {
-                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(await response.Content.ReadAsStringAsync());
+                    var content = await response.Content.ReadAsStringAsync();
+                    result = JsonConvert.DeserializeObject<StandardApiResponse<bool>>(content);
+                    if (!result.Success)
+                    {
+                        Assert.False(true, await response.Content.ReadAsStringAsync());
+                    }
                 }
                 else
                 {
-                    switch (response.StatusCode)
-                    {
-                        case System.Net.HttpStatusCode.BadRequest:
-                            Assert.False(true, response.ReasonPhrase + await response.Content.ReadAsStringAsync());
-                            break;
-
-                        case System.Net.HttpStatusCode.InternalServerError:
-                            Assert.False(true, "Internal code error - please check the source code" + await response.Content.ReadAsStringAsync());
-                            break;
-                    }
+                    Assert.False(true, await response.Content.ReadAsStringAsync());
                 }
 
             }
